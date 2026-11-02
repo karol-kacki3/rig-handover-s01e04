@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { loadConfig, type RigConfig } from './config.js';
 import { lane } from './lane.js';
+import { createDigestRouter } from './routes/digest.js';
+import { createDigestApiRouter } from './routes/digest-api.js';
 import { readStatus } from './status.js';
 import { Layout } from './views/layout.js';
 import { StatusBoard } from './views/status.js';
@@ -10,13 +12,16 @@ export function createApp(config: RigConfig = loadConfig()) {
 
   app.get('/health', (c) => c.json({ ok: true, lane: lane().id }));
 
-  app.get('/', (c) =>
+  app.get('/', async (c) =>
     c.html(
       <Layout title="status" lane={lane()}>
-        <StatusBoard status={readStatus(config)} />
+        <StatusBoard status={await readStatus(config)} />
       </Layout>,
     ),
   );
+
+  app.route('/digest', createDigestRouter(config));
+  app.route('/api/digest', createDigestApiRouter(config));
 
   return app;
 }
