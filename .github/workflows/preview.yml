@@ -1,0 +1,85 @@
+name: Digest preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_marker:
+        description: Include the lane marker (true for review, false for cleanup)
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Save and verify the running digest
+        env:
+          LANE_MARKER: ${{ inputs.include_marker && secrets.LANE_MARKER || '' }}
+          INCLUDE_MARKER: ${{ inputs.include_marker }}
+          PORT: 8787
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$INCLUDE_MARKER" == true && -z "${LANE_MARKER//[[:space:]]/}" ]]; then
+            echo 'LANE_MARKER secret is required for the initial preview.' >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/preview"
+          pnpm start > "$RUNNER_TEMP/rig.log" 2>&1 &
+          rig_pid=$!
+          trap 'kill "$rig_pid" 2>/dev/null || true' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-connrefused \
+            --retry-delay 1 --max-time 5 --retry-max-time 60 \
+            http://127.0.0.1:8787/health --output /dev/null
+          curl --fail --silent --show-error --max-time 10 \
+            http://127.0.0.1:8787/digest/2026-10-28 \
+            --output "$RUNNER_TEMP/preview/index.html"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const html = readFileSync(`${process.env.RUNNER_TEMP}/preview/index.html`, 'utf8');
+          // Report only fixed messages: validation failures must not print the page/marker.
+          function check(ok, message) {
+            if (!ok) throw new Error(message);
+          }
+          check(/^<!doctype html>/i.test(html), 'Expected a complete HTML document');
+          check(/<\/html>\s*$/i.test(html), 'Expected a complete HTML document');
+          check(/<style>[\s\S]+<\/style>/i.test(html), 'Expected inline stylesheet');
+          check(/<main>[\s\S]*2026-10-28[\s\S]*<\/main>/i.test(html), 'Expected the requested digest');
+          check(/<span class="marker">[^<]+<\/span>/.test(html), 'Expected lane banner');
+          check(!/<(?:script|link|iframe|object|embed|base)\b|\s(?:src|srcset|poster|on\w+)\s*=|@import\b|url\s*\(|javascript\s*:/i.test(html), 'Expected self-contained HTML without client JS');
+          if (process.env.INCLUDE_MARKER === 'false') {
+            check(/<span class="marker">no marker set<\/span>/.test(html), 'Expected marker-free cleanup');
+          }
+          NODE
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/preview
+          retention-days: 1
+      - name: Deploy preview
+        id: deployment
+        uses: actions/deploy-pages@v4
